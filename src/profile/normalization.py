@@ -11,7 +11,14 @@ from dataclasses import dataclass
 from math import isfinite
 
 from .exceptions import ProfileValidationError
-from .models import PREFERENCE_DIMENSIONS, PreferenceDimension, RouteAttributes
+from .models import (
+    FeatureComparison,
+    PREFERENCE_DIMENSIONS,
+    PairwisePreference,
+    PreferenceDimension,
+    RouteAttributes,
+    RouteFeatureVector,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,3 +77,31 @@ class RouteAttributeNormalizer:
             for dimension in PREFERENCE_DIMENSIONS
         }
 
+
+class NormalizedCostFeatureExtractor:
+    """将业务路线转换为版本化的四维 FAVOUR 代价特征。"""
+
+    def __init__(
+        self,
+        normalizer: RouteAttributeNormalizer | None = None,
+        schema_version: str = "four-cost-v1",
+    ) -> None:
+        self._normalizer = normalizer or RouteAttributeNormalizer()
+        self._schema_version = schema_version
+
+    @property
+    def schema_version(self) -> str:
+        return self._schema_version
+
+    def extract(self, route: RouteAttributes) -> RouteFeatureVector:
+        return RouteFeatureVector(
+            values=self._normalizer.normalize(route),
+            schema_version=self._schema_version,
+        )
+
+    def extract_comparison(self, preference: PairwisePreference) -> FeatureComparison:
+        return FeatureComparison(
+            chosen=self.extract(preference.chosen),
+            rejected=self.extract(preference.rejected),
+            evidence_weight=preference.evidence_weight,
+        )
