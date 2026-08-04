@@ -146,21 +146,29 @@ def _print_result(
     learner = PairwisePreferenceWeightLearner()
     result = learner.fit(comparisons, GroupPreferencePrior.uniform())
 
-    output_fn("\n根据路线选择反推得到的偏好权重")
+    output_fn("\n根据路线选择反推得到的四维偏好画像")
     for dimension in PREFERENCE_DIMENSIONS:
-        output_fn(f"  {DIMENSION_LABELS[dimension]}：{result.weights[dimension]:.2%}")
+        standard_deviation = result.diagnostics.posterior_standard_deviations[dimension]
+        output_fn(
+            f"  {DIMENSION_LABELS[dimension]}：{result.weights[dimension]:.2%}"
+            f"（模型系数 {result.coefficients[dimension]:.4f}，"
+            f"后验标准差 {standard_deviation:.4f}）"
+        )
 
     most_important = max(PREFERENCE_DIMENSIONS, key=result.weights.__getitem__)
     output_fn(
         f"  当前最敏感的指标：{DIMENSION_LABELS[most_important]}"
         "（越敏感，越不愿意承受该项代价）"
     )
-    output_fn(f"  有效路线比较：{len(comparisons)} 条")
-    output_fn(f"  选择一致性：{result.diagnostics.choice_consistency:.2%}")
-    output_fn(
-        f"  工程可信度：{result.diagnostics.confidence:.2%}"
-        "（比较题较少时，结果会更多地保留等权先验）"
-    )
+    output_fn(f"  累计有效路线比较：{result.diagnostics.evidence_count} 条")
+    if comparisons:
+        output_fn(
+            "  已观察选择的平均后验预测概率："
+            f"{result.diagnostics.choice_consistency:.2%}"
+        )
+    else:
+        output_fn("  已观察选择的平均后验预测概率：暂无个人证据")
+    output_fn("  注：后验标准差越大，表示当前证据下该维度仍越不确定。")
 
 
 def run_interactive(
@@ -169,6 +177,7 @@ def run_interactive(
 ) -> None:
     """执行“设计路线比较—收集选择—反推权重”的完整交互流程。"""
 
+    # 生成 6 组路线
     scenarios = _comparison_scenarios()
     output_fn("=" * 64)
     output_fn("个性化多模式出行——路线选择反推偏好权重")
@@ -176,6 +185,7 @@ def run_interactive(
     output_fn("你的选择会与路线的时间、费用、步行和换乘属性一起进入学习器。")
     output_fn("=" * 64)
 
+    # collected 用于保存测试时选择和拒绝的路线属性信息
     collected: list[PairwisePreference] = []
     for index, scenario in enumerate(scenarios, start=1):
         output_fn(f"\n[{index}/{len(scenarios)}]")
@@ -185,9 +195,11 @@ def run_interactive(
 
     comparisons = tuple(collected)
     if not comparisons:
-        output_fn("\n没有有效选择，系统只能返回四项等权、可信度为0的初始结果。")
+        output_fn("\n没有有效选择，系统返回四项等权的 Gaussian 初始画像。")
     else:
         output_fn(f"\n已收集 {len(comparisons)} 条有效选择，开始反推个人偏好权重。")
+
+    # 通过得到的选择计算后得到偏好权重
     _print_result(output_fn, comparisons)
 
 
