@@ -45,9 +45,10 @@ class InteractiveProfileDemoTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("已收集 6 条有效选择", result.stdout)
-        self.assertIn("根据路线选择反推得到的偏好权重", result.stdout)
+        self.assertIn("根据路线选择反推得到的四维偏好画像", result.stdout)
         self.assertIn("当前最敏感的指标：费用", result.stdout)
-        self.assertIn("有效路线比较：6 条", result.stdout)
+        self.assertIn("累计有效路线比较：6 条", result.stdout)
+        self.assertIn("已观察选择的平均后验预测概率", result.stdout)
         self.assertNotIn("长期硬约束", result.stdout)
         self.assertNotIn("本次动态画像", result.stdout)
 
@@ -62,8 +63,8 @@ class InteractiveProfileDemoTests(unittest.TestCase):
         self.assertIn("费用：25.00%", result.stdout)
         self.assertIn("步行距离：25.00%", result.stdout)
         self.assertIn("换乘次数：25.00%", result.stdout)
-        self.assertIn("有效路线比较：0 条", result.stdout)
-        self.assertIn("工程可信度：0.00%", result.stdout)
+        self.assertIn("累计有效路线比较：0 条", result.stdout)
+        self.assertIn("平均后验预测概率：暂无个人证据", result.stdout)
 
 
 if __name__ == "__main__":
