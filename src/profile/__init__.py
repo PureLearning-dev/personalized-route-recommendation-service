@@ -1,65 +1,37 @@
-"""通过路线成对选择学习 FAVOUR 四维用户画像。"""
+"""FAVOUR论文流程的四维缩减实现。"""
 
-from .exceptions import (
-    ProfileError,
-    ProfileNumericalError,
-    ProfileStateError,
-    ProfileValidationError,
-)
+from .exceptions import ProfileNumericalError, ProfileValidationError
 from .inference import (
     BradleyTerryLogitLikelihood,
-    FavourLaplacePosteriorEstimator,
     FavourPosteriorObjective,
     FavourPosteriorPredictor,
+    MassPreferencePriorEstimator,
 )
-from .learner import PairwisePreferenceWeightLearner, WeightLearningConfig
+from .learner import PairwisePreferenceWeightLearner, standard_mass_preference_prior
 from .models import (
-    GaussianPreferencePrior,
-    GroupPreferencePrior,
+    GaussianPreferenceModel,
     PREFERENCE_DIMENSIONS,
     PairwisePreference,
     PreferenceDimension,
     PreferenceLearningResult,
-    PreferencePosterior,
     RouteAttributes,
 )
-from .normalization import (
-    NormalizationScale,
-    NormalizedCostFeatureExtractor,
-    RouteAttributeNormalizer,
-)
-from .priors import FixedGaussianPriorProvider, MassPreferencePriorEstimator
-from .service import (
-    FavourPreferenceLearningService,
-    InMemoryPosteriorRepository,
-    PosteriorRepository,
-)
+from .normalization import NormalizedCostFeatureExtractor
 
 __all__ = [
     "BradleyTerryLogitLikelihood",
-    "FavourLaplacePosteriorEstimator",
     "FavourPosteriorObjective",
     "FavourPosteriorPredictor",
-    "FavourPreferenceLearningService",
-    "FixedGaussianPriorProvider",
-    "GaussianPreferencePrior",
-    "GroupPreferencePrior",
-    "InMemoryPosteriorRepository",
+    "GaussianPreferenceModel",
     "MassPreferencePriorEstimator",
-    "NormalizationScale",
     "NormalizedCostFeatureExtractor",
     "PREFERENCE_DIMENSIONS",
     "PairwisePreference",
     "PairwisePreferenceWeightLearner",
-    "PosteriorRepository",
     "PreferenceDimension",
     "PreferenceLearningResult",
-    "PreferencePosterior",
-    "ProfileError",
     "ProfileNumericalError",
-    "ProfileStateError",
     "ProfileValidationError",
-    "RouteAttributeNormalizer",
     "RouteAttributes",
-    "WeightLearningConfig",
+    "standard_mass_preference_prior",
 ]
