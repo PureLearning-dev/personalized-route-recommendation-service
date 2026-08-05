@@ -1,142 +1,100 @@
-"""FAVOUR 四维缩减模型的简洁学习入口。"""
+"""按FAVOUR论文流程学习四维用户画像。"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-from math import isfinite
 
-from .exceptions import ProfileValidationError
 from .inference import (
-    BradleyTerryLogitLikelihood,
-    FavourLaplacePosteriorEstimator,
+    FavourLaplaceInference,
     FavourPosteriorPredictor,
+    MassPreferencePriorEstimator,
 )
 from .models import (
-    GaussianPreferencePrior,
-    GroupPreferencePrior,
+    FeatureComparison,
+    GaussianPreferenceModel,
+    Matrix,
+    PREFERENCE_DIMENSIONS,
     PairwisePreference,
     PreferenceLearningResult,
 )
-from .normalization import NormalizedCostFeatureExtractor, RouteAttributeNormalizer
-from .optimization import BoxConstrainedNewtonOptimizer, NewtonOptimizerConfig
-from .priors import FixedGaussianPriorProvider, LegacyGroupPriorAdapter
-from .service import (
-    FavourPreferenceLearningService,
-    PosteriorRepository,
-    RelativeWeightProfilePresenter,
-)
+from .normalization import NormalizedCostFeatureExtractor
 
 
-@dataclass(frozen=True, slots=True)
-class WeightLearningConfig:
-    """FAVOUR 后验众数优化与旧先验转换配置。"""
+def standard_mass_preference_prior() -> GaussianPreferenceModel:
+    """论文图2的MPP初值 N(0, I)，并限制四项代价系数不大于0。"""
 
-    max_iterations: int = 200
-    tolerance: float = 1e-9
-    initial_jitter: float = 1e-10
-    line_search_shrink: float = 0.5
-    armijo_constant: float = 1e-4
-    minimum_step_size: float = 1e-10
-    coefficient_scale: float = 4.0
-    prior_variance_scale: float = 4.0
-    coefficient_upper_bound: float = 20.0
-    prior_strength_multiplier: float = 1.0
-
-    def __post_init__(self) -> None:
-        if isinstance(self.max_iterations, bool) or self.max_iterations <= 0:
-            raise ProfileValidationError("最大迭代次数必须为正整数")
-        if not 0 < self.line_search_shrink < 1:
-            raise ProfileValidationError("line_search_shrink 必须位于 (0, 1)")
-        if not 0 < self.armijo_constant < 1:
-            raise ProfileValidationError("armijo_constant 必须位于 (0, 1)")
-        for field_name in (
-            "tolerance",
-            "initial_jitter",
-            "minimum_step_size",
-            "coefficient_scale",
-            "prior_variance_scale",
-            "coefficient_upper_bound",
-            "prior_strength_multiplier",
-        ):
-            value = float(getattr(self, field_name))
-            if not isfinite(value) or value <= 0:
-                raise ProfileValidationError(f"{field_name} 必须是有限的正数")
-            object.__setattr__(self, field_name, value)
+    size = len(PREFERENCE_DIMENSIONS)
+    identity: Matrix = tuple(
+        tuple(1.0 if row == column else 0.0 for column in range(size))
+        for row in range(size)
+    )
+    return GaussianPreferenceModel(
+        mean={dimension: 0.0 for dimension in PREFERENCE_DIMENSIONS},
+        covariance=identity,
+        lower_bounds={dimension: -20.0 for dimension in PREFERENCE_DIMENSIONS},
+        upper_bounds={dimension: 0.0 for dimension in PREFERENCE_DIMENSIONS},
+    )
 
 
 class PairwisePreferenceWeightLearner:
-    """通过路线成对选择学习四维 FAVOUR 偏好后验。
+    """FAVOUR的MPP、逐题更新、Laplace后验和预测统一入口。"""
 
-    内部系数是非负、无需和为 1 的代价敏感度；``result.weights`` 只是展示层
-    归一化后的四维画像百分比，``result.coefficients`` 才是模型实际使用的系数。
-    """
-
-    def __init__(
-        self,
-        normalizer: RouteAttributeNormalizer | None = None,
-        config: WeightLearningConfig | None = None,
-    ) -> None:
-        self._config = config or WeightLearningConfig()
-        self._feature_extractor = NormalizedCostFeatureExtractor(normalizer)
-        likelihood = BradleyTerryLogitLikelihood()
-        optimizer = BoxConstrainedNewtonOptimizer(
-            NewtonOptimizerConfig(
-                max_iterations=self._config.max_iterations,
-                tolerance=self._config.tolerance,
-                initial_jitter=self._config.initial_jitter,
-                line_search_shrink=self._config.line_search_shrink,
-                armijo_constant=self._config.armijo_constant,
-                minimum_step_size=self._config.minimum_step_size,
-            )
-        )
-        self._estimator = FavourLaplacePosteriorEstimator(optimizer, likelihood)
+    def __init__(self) -> None:
+        self._extractor = NormalizedCostFeatureExtractor()
+        self._inference = FavourLaplaceInference()
+        self._mpp_estimator = MassPreferencePriorEstimator(self._inference)
         self._predictor = FavourPosteriorPredictor()
-        self._presenter = RelativeWeightProfilePresenter()
-        self._legacy_prior_adapter = LegacyGroupPriorAdapter(
-            coefficient_scale=self._config.coefficient_scale,
-            base_variance=(
-                self._config.prior_variance_scale
-                / self._config.prior_strength_multiplier
-            ),
-            upper_bound=self._config.coefficient_upper_bound,
-            feature_schema_version=self._feature_extractor.schema_version,
-        )
 
-    def _convert_prior(
+    def _extract(
         self,
-        prior: GroupPreferencePrior | GaussianPreferencePrior,
-    ) -> GaussianPreferencePrior:
-        if isinstance(prior, GaussianPreferencePrior):
-            return prior
-        if isinstance(prior, GroupPreferencePrior):
-            return self._legacy_prior_adapter.convert(prior)
-        raise ProfileValidationError(
-            "先验必须是 GroupPreferencePrior 或 GaussianPreferencePrior"
-        )
-
-    def create_service(
-        self,
-        prior: GroupPreferencePrior | GaussianPreferencePrior,
-        repository: PosteriorRepository | None = None,
-    ) -> FavourPreferenceLearningService:
-        """创建可执行批量学习、增量更新和选择预测的应用服务。"""
-
-        gaussian_prior = self._convert_prior(prior)
-        return FavourPreferenceLearningService(
-            feature_extractor=self._feature_extractor,
-            prior_provider=FixedGaussianPriorProvider(gaussian_prior),
-            estimator=self._estimator,
-            predictor=self._predictor,
-            presenter=self._presenter,
-            repository=repository,
+        comparisons: Sequence[PairwisePreference],
+    ) -> tuple[FeatureComparison, ...]:
+        return tuple(
+            self._extractor.extract_comparison(comparison)
+            for comparison in comparisons
         )
 
     def fit(
         self,
         comparisons: Sequence[PairwisePreference],
-        prior: GroupPreferencePrior | GaussianPreferencePrior,
+        group_histories: Sequence[Sequence[PairwisePreference]] = (),
+        mass_preference_prior: GaussianPreferenceModel | None = None,
     ) -> PreferenceLearningResult:
-        """从一批路线选择学习后验，并返回模型系数及四维展示画像。"""
+        """先获得MPP，再按公式（6）逐题形成个人画像。"""
 
-        return self.create_service(prior).fit(comparisons)
+        prior = mass_preference_prior or standard_mass_preference_prior()
+        if group_histories:
+            prior = self._mpp_estimator.refine(
+                tuple(self._extract(history) for history in group_histories),
+                prior,
+            )
+
+        observations = self._extract(comparisons)
+        posterior, converged = self._inference.update_incrementally(
+            observations,
+            prior,
+        )
+        probabilities = tuple(
+            self._predictor.probability(posterior, observation)
+            for observation in observations
+        )
+        sensitivities = {
+            dimension: max(0.0, -posterior.mean[dimension])
+            for dimension in PREFERENCE_DIMENSIONS
+        }
+        total = sum(sensitivities.values())
+        if total <= 1e-12:
+            equal = 1.0 / len(PREFERENCE_DIMENSIONS)
+            weights = {dimension: equal for dimension in PREFERENCE_DIMENSIONS}
+        else:
+            weights = {
+                dimension: sensitivities[dimension] / total
+                for dimension in PREFERENCE_DIMENSIONS
+            }
+        return PreferenceLearningResult(
+            posterior=posterior,
+            weights=weights,
+            evidence_count=len(observations),
+            converged=converged,
+            choice_probabilities=probabilities,
+        )
