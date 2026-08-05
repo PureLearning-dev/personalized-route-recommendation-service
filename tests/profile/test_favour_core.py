@@ -1,71 +1,58 @@
-"""FAVOUR 四维缩减实现的公式级和流程级验证。"""
+"""严格FAVOUR四维实现的公式、优化器和流程验证。"""
 
 from __future__ import annotations
 
-from math import isclose
-from math import pi, sqrt
+from math import isclose, log, pi, sqrt
 import unittest
 
 from src.profile import (
     BradleyTerryLogitLikelihood,
     FavourPosteriorObjective,
     FavourPosteriorPredictor,
-    FixedGaussianPriorProvider,
-    GaussianPreferencePrior,
-    GroupPreferencePrior,
-    InMemoryPosteriorRepository,
+    GaussianPreferenceModel,
     MassPreferencePriorEstimator,
     NormalizedCostFeatureExtractor,
     PREFERENCE_DIMENSIONS,
     PairwisePreference,
     PairwisePreferenceWeightLearner,
     PreferenceDimension,
-    PreferencePosterior,
     RouteAttributes,
+    standard_mass_preference_prior,
+)
+from src.profile.optimization import (
+    BoxBoundedTrustRegionOptimizer,
+    ObjectiveEvaluation,
 )
 
 
 def _cost_sensitive_comparison(suffix: str = "1") -> PairwisePreference:
-    """选择更便宜但更慢的路线。"""
-
     return PairwisePreference(
         chosen=RouteAttributes(f"cheap-{suffix}", 60, 0, 300, 1),
         rejected=RouteAttributes(f"fast-{suffix}", 30, 100, 300, 1),
     )
 
 
-def _posterior(
+def _model(
     coefficients: tuple[float, float, float, float],
     variance: float,
-    evidence_count: int,
-) -> PreferencePosterior:
+) -> GaussianPreferenceModel:
     covariance = tuple(
         tuple(variance if row == column else 0.0 for column in range(4))
         for row in range(4)
     )
-    values = {
-        dimension: coefficients[index]
-        for index, dimension in enumerate(PREFERENCE_DIMENSIONS)
-    }
-    return PreferencePosterior(
-        coefficients=values,
+    return GaussianPreferenceModel(
+        mean={
+            dimension: coefficients[index]
+            for index, dimension in enumerate(PREFERENCE_DIMENSIONS)
+        },
         covariance=covariance,
-        lower_bounds={dimension: 0.0 for dimension in PREFERENCE_DIMENSIONS},
-        upper_bounds={dimension: 10.0 for dimension in PREFERENCE_DIMENSIONS},
-        evidence_count=evidence_count,
-        converged=True,
-        iterations=2,
-        negative_log_posterior=1.0,
-        prior_name="test",
-        prior_version="v1",
-        feature_schema_version="four-cost-v1",
+        lower_bounds={dimension: -20.0 for dimension in PREFERENCE_DIMENSIONS},
+        upper_bounds={dimension: 0.0 for dimension in PREFERENCE_DIMENSIONS},
     )
 
 
 class FavourFormulaTests(unittest.TestCase):
-    """检查公式符号、导数和 Gaussian 后验计算。"""
-
-    def test_logit_probability_is_symmetric(self) -> None:
+    def test_formula_four_logit_probability_is_symmetric(self) -> None:
         likelihood = BradleyTerryLogitLikelihood()
         self.assertAlmostEqual(
             likelihood.probability(1.7) + likelihood.probability(-1.7),
@@ -73,12 +60,45 @@ class FavourFormulaTests(unittest.TestCase):
             places=12,
         )
 
-    def test_analytic_gradient_matches_finite_difference(self) -> None:
+    def test_formula_five_joint_likelihood_matches_probability_product(self) -> None:
         extractor = NormalizedCostFeatureExtractor()
-        observation = extractor.extract_comparison(_cost_sensitive_comparison())
-        prior = FixedGaussianPriorProvider.uniform(variance=2.0)
-        objective = FavourPosteriorObjective((observation,), prior)
-        point = (1.2, 0.9, 1.1, 0.8)
+        observations = (
+            extractor.extract_comparison(_cost_sensitive_comparison("first")),
+            extractor.extract_comparison(_cost_sensitive_comparison("second")),
+        )
+        point = (-1.0, -2.0, -1.0, -1.0)
+        objective = FavourPosteriorObjective(
+            observations,
+            standard_mass_preference_prior(),
+        )
+        probability_product = 1.0
+        for observation in observations:
+            margin = sum(
+                coefficient * difference
+                for coefficient, difference in zip(
+                    point,
+                    observation.utility_difference(),
+                    strict=True,
+                )
+            )
+            probability_product *= BradleyTerryLogitLikelihood.probability(margin)
+
+        gaussian_penalty = 0.5 * sum(value * value for value in point)
+        self.assertAlmostEqual(
+            objective.evaluate(point).value,
+            gaussian_penalty - log(probability_product),
+            places=12,
+        )
+
+    def test_analytic_gradient_matches_finite_difference(self) -> None:
+        observation = NormalizedCostFeatureExtractor().extract_comparison(
+            _cost_sensitive_comparison()
+        )
+        objective = FavourPosteriorObjective(
+            (observation,),
+            standard_mass_preference_prior(),
+        )
+        point = (-1.2, -0.9, -1.1, -0.8)
         analytic = objective.evaluate(point).gradient
         epsilon = 1e-6
 
@@ -93,80 +113,114 @@ class FavourFormulaTests(unittest.TestCase):
             ) / (2.0 * epsilon)
             self.assertAlmostEqual(analytic[index], numeric, places=6)
 
-    def test_observation_reduces_variance_along_cost_direction(self) -> None:
-        prior = FixedGaussianPriorProvider.uniform(variance=5.0, upper_bound=50.0)
-        result = PairwisePreferenceWeightLearner().fit(
-            tuple(_cost_sensitive_comparison(str(index)) for index in range(12)),
-            prior,
+    def test_analytic_hessian_matches_finite_difference(self) -> None:
+        observation = NormalizedCostFeatureExtractor().extract_comparison(
+            _cost_sensitive_comparison()
         )
-        cost_index = PREFERENCE_DIMENSIONS.index(PreferenceDimension.COST)
-        self.assertLess(result.posterior.covariance[cost_index][cost_index], 5.0)
-        self.assertTrue(result.posterior.converged)
+        objective = FavourPosteriorObjective(
+            (observation,),
+            standard_mass_preference_prior(),
+        )
+        point = (-1.2, -0.9, -1.1, -0.8)
+        analytic = objective.evaluate(point).hessian
+        epsilon = 1e-6
 
-    def test_mass_preference_prior_matches_formula_seven(self) -> None:
-        first = _posterior((1.0, 2.0, 3.0, 4.0), variance=1.0, evidence_count=2)
-        second = _posterior((3.0, 4.0, 5.0, 6.0), variance=2.0, evidence_count=3)
-        prior = MassPreferencePriorEstimator(
-            covariance_regularization=1e-6
-        ).estimate((first, second))
+        for column in range(4):
+            left = list(point)
+            right = list(point)
+            left[column] -= epsilon
+            right[column] += epsilon
+            left_gradient = objective.evaluate(tuple(left)).gradient
+            right_gradient = objective.evaluate(tuple(right)).gradient
+            for row in range(4):
+                numeric = (right_gradient[row] - left_gradient[row]) / (2.0 * epsilon)
+                self.assertAlmostEqual(analytic[row][column], numeric, places=6)
 
-        self.assertEqual(prior.mean_vector(), (2.0, 3.0, 4.0, 5.0))
-        self.assertAlmostEqual(prior.covariance[0][0], 2.500001, places=6)
-        self.assertAlmostEqual(prior.covariance[0][1], 1.0, places=12)
-        self.assertEqual(prior.evidence_count, 5)
+    def test_formula_seven_mass_preference_aggregation(self) -> None:
+        first = _model((-1.0, -2.0, -3.0, -4.0), 1.0)
+        second = _model((-3.0, -4.0, -5.0, -6.0), 2.0)
+        aggregated = MassPreferencePriorEstimator.aggregate((first, second))
 
-    def test_posterior_prediction_matches_formula_nine(self) -> None:
-        posterior = _posterior((2.0, 0.0, 0.0, 0.0), variance=1.0, evidence_count=2)
+        self.assertEqual(aggregated.mean_vector(), (-2.0, -3.0, -4.0, -5.0))
+        self.assertAlmostEqual(aggregated.covariance[0][0], 2.5)
+        self.assertAlmostEqual(aggregated.covariance[0][1], 1.0)
+
+    def test_formula_nine_prediction_matches_manual_value(self) -> None:
+        posterior = _model((-2.0, 0.0, 0.0, 0.0), 1.0)
         comparison = PairwisePreference(
             chosen=RouteAttributes("chosen", 0, 10, 100, 0),
             rejected=RouteAttributes("rejected", 90, 10, 100, 0),
         )
         observation = NormalizedCostFeatureExtractor().extract_comparison(comparison)
-        difference = observation.cost_difference()
+        difference = observation.utility_difference()
         variance = difference[0] ** 2
         attenuation = 1.0 / sqrt(1.0 + pi * variance / 8.0)
         expected = BradleyTerryLogitLikelihood.probability(
-            attenuation * 2.0 * difference[0]
+            attenuation * -2.0 * difference[0]
         )
 
-        actual = FavourPosteriorPredictor().probability_chosen(
-            posterior,
-            observation,
+        self.assertAlmostEqual(
+            FavourPosteriorPredictor.probability(posterior, observation),
+            expected,
+            places=12,
         )
-        self.assertAlmostEqual(actual, expected, places=12)
+
+
+class TrustRegionTests(unittest.TestCase):
+    def test_box_bounded_trust_region_finds_quadratic_minimum(self) -> None:
+        target = (-2.0, -3.0, -4.0, -5.0)
+        identity = tuple(
+            tuple(1.0 if row == column else 0.0 for column in range(4))
+            for row in range(4)
+        )
+
+        def objective(point: tuple[float, ...]) -> ObjectiveEvaluation:
+            difference = tuple(
+                value - expected
+                for value, expected in zip(point, target, strict=True)
+            )
+            return ObjectiveEvaluation(
+                value=0.5 * sum(value * value for value in difference),
+                gradient=difference,
+                hessian=identity,
+            )
+
+        result = BoxBoundedTrustRegionOptimizer().optimize(
+            objective,
+            (-20.0,) * 4,
+            (0.0,) * 4,
+        )
+
+        self.assertTrue(result.converged)
+        for actual, expected in zip(result.point, target, strict=True):
+            self.assertAlmostEqual(actual, expected, places=6)
 
 
 class FavourWorkflowTests(unittest.TestCase):
-    """验证四维画像、非单纯形系数、预测和增量状态。"""
+    def test_no_evidence_returns_paper_mpp_initialization(self) -> None:
+        result = PairwisePreferenceWeightLearner().fit(())
 
-    def test_no_evidence_returns_four_equal_profile_dimensions(self) -> None:
-        result = PairwisePreferenceWeightLearner().fit((), GroupPreferencePrior.uniform())
-
-        self.assertEqual(tuple(result.weights), PREFERENCE_DIMENSIONS)
+        self.assertEqual(result.posterior.mean_vector(), (0.0, 0.0, 0.0, 0.0))
         self.assertTrue(all(isclose(value, 0.25) for value in result.weights.values()))
-        self.assertEqual(result.diagnostics.evidence_count, 0)
-        self.assertEqual(sum(result.coefficients.values()), 4.0)
+        self.assertEqual(result.evidence_count, 0)
 
-    def test_cost_evidence_changes_unconstrained_coefficients_and_display_weights(self) -> None:
+    def test_formula_six_incremental_learning_raises_cost_sensitivity(self) -> None:
         comparisons = tuple(
-            _cost_sensitive_comparison(str(index)) for index in range(20)
+            _cost_sensitive_comparison(str(index)) for index in range(12)
         )
-        result = PairwisePreferenceWeightLearner().fit(
-            comparisons,
-            GroupPreferencePrior.uniform(),
-        )
+        result = PairwisePreferenceWeightLearner().fit(comparisons)
 
-        self.assertEqual(set(result.weights), set(PREFERENCE_DIMENSIONS))
-        self.assertAlmostEqual(sum(result.weights.values()), 1.0, places=12)
-        self.assertFalse(isclose(sum(result.coefficients.values()), 1.0))
+        self.assertTrue(result.converged)
+        self.assertEqual(result.evidence_count, len(comparisons))
+        self.assertTrue(all(value <= 0.0 for value in result.utility_coefficients.values()))
         self.assertEqual(
             max(PREFERENCE_DIMENSIONS, key=result.weights.__getitem__),
             PreferenceDimension.COST,
         )
-        self.assertEqual(result.diagnostics.evidence_count, len(comparisons))
+        self.assertGreater(sum(result.choice_probabilities) / len(comparisons), 0.5)
 
-    def test_each_of_the_four_profile_dimensions_can_be_recovered(self) -> None:
-        route_values = {
+    def test_each_of_the_four_dimensions_can_be_recovered(self) -> None:
+        chosen_values = {
             PreferenceDimension.TIME: (20, 20, 200, 0),
             PreferenceDimension.COST: (60, 0, 200, 0),
             PreferenceDimension.WALKING_DISTANCE: (60, 20, 0, 0),
@@ -182,19 +236,16 @@ class FavourWorkflowTests(unittest.TestCase):
         for dimension in PREFERENCE_DIMENSIONS:
             chosen = RouteAttributes(
                 f"chosen-{dimension.value}",
-                *route_values[dimension],
+                *chosen_values[dimension],
             )
             rejected = RouteAttributes(
                 f"rejected-{dimension.value}",
                 *rejected_values[dimension],
             )
-            evidence = tuple(
-                PairwisePreference(chosen, rejected) for _ in range(12)
+            comparisons = tuple(
+                PairwisePreference(chosen, rejected) for _ in range(10)
             )
-            result = PairwisePreferenceWeightLearner().fit(
-                evidence,
-                GroupPreferencePrior.uniform(),
-            )
+            result = PairwisePreferenceWeightLearner().fit(comparisons)
 
             with self.subTest(dimension=dimension):
                 self.assertEqual(
@@ -202,41 +253,19 @@ class FavourWorkflowTests(unittest.TestCase):
                     dimension,
                 )
 
-    def test_strong_evidence_is_not_capped_by_simplex_probability(self) -> None:
-        comparisons = tuple(
-            _cost_sensitive_comparison(str(index)) for index in range(80)
+    def test_group_histories_refine_the_mpp_used_for_a_new_user(self) -> None:
+        history = tuple(
+            _cost_sensitive_comparison(f"history-{index}") for index in range(4)
         )
-        prior = FixedGaussianPriorProvider.uniform(variance=25.0, upper_bound=50.0)
-        result = PairwisePreferenceWeightLearner().fit(comparisons, prior)
-        extractor = NormalizedCostFeatureExtractor()
-        observation = extractor.extract_comparison(comparisons[0])
-        likelihood_margin = sum(
-            coefficient * delta
-            for coefficient, delta in zip(
-                result.posterior.coefficient_vector(),
-                observation.cost_difference(),
-                strict=True,
-            )
+        result = PairwisePreferenceWeightLearner().fit(
+            (),
+            group_histories=(history, history),
         )
 
-        self.assertGreater(BradleyTerryLogitLikelihood.probability(likelihood_margin), 0.90)
-
-    def test_incremental_service_persists_and_predicts(self) -> None:
-        repository = InMemoryPosteriorRepository()
-        service = PairwisePreferenceWeightLearner().create_service(
-            GroupPreferencePrior.uniform(),
-            repository,
+        self.assertEqual(
+            max(PREFERENCE_DIMENSIONS, key=result.weights.__getitem__),
+            PreferenceDimension.COST,
         )
-        comparison = _cost_sensitive_comparison()
-
-        first = service.update_user("user-1", comparison)
-        second = service.update_user("user-1", comparison)
-        probability = service.predict_user_choice("user-1", comparison)
-
-        self.assertEqual(first.diagnostics.evidence_count, 1)
-        self.assertEqual(second.diagnostics.evidence_count, 2)
-        self.assertGreater(probability, 0.5)
-        self.assertLessEqual(probability, 1.0)
 
 
 if __name__ == "__main__":
