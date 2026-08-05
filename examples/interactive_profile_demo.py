@@ -23,7 +23,6 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.profile import (  # noqa: E402
-    GroupPreferencePrior,
     PREFERENCE_DIMENSIONS,
     PairwisePreference,
     PairwisePreferenceWeightLearner,
@@ -141,17 +140,16 @@ def _print_result(
 ) -> None:
     """调用正式学习器反推权重，并展示结果及基本质量信息。"""
 
-    # 第一版在没有个人证据时采用四项等权的群体先验。用户完成的有效比较越
-    # 多，个人选择对最终结果的影响越明显。先验只用于稳定少量样本下的结果。
+    # 没有历史群体数据时，按论文图2从 N(0, I) 的MPP初值开始。
     learner = PairwisePreferenceWeightLearner()
-    result = learner.fit(comparisons, GroupPreferencePrior.uniform())
+    result = learner.fit(comparisons)
 
     output_fn("\n根据路线选择反推得到的四维偏好画像")
     for dimension in PREFERENCE_DIMENSIONS:
-        standard_deviation = result.diagnostics.posterior_standard_deviations[dimension]
+        standard_deviation = result.standard_deviations[dimension]
         output_fn(
             f"  {DIMENSION_LABELS[dimension]}：{result.weights[dimension]:.2%}"
-            f"（模型系数 {result.coefficients[dimension]:.4f}，"
+            f"（论文效用系数 {result.utility_coefficients[dimension]:.4f}，"
             f"后验标准差 {standard_deviation:.4f}）"
         )
 
@@ -160,14 +158,12 @@ def _print_result(
         f"  当前最敏感的指标：{DIMENSION_LABELS[most_important]}"
         "（越敏感，越不愿意承受该项代价）"
     )
-    output_fn(f"  累计有效路线比较：{result.diagnostics.evidence_count} 条")
-    if comparisons:
-        output_fn(
-            "  已观察选择的平均后验预测概率："
-            f"{result.diagnostics.choice_consistency:.2%}"
+    output_fn(f"  累计有效路线比较：{result.evidence_count} 条")
+    if result.choice_probabilities:
+        mean_probability = sum(result.choice_probabilities) / len(
+            result.choice_probabilities
         )
-    else:
-        output_fn("  已观察选择的平均后验预测概率：暂无个人证据")
+        output_fn(f"  已选路线的平均后验概率：{mean_probability:.2%}")
     output_fn("  注：后验标准差越大，表示当前证据下该维度仍越不确定。")
 
 
