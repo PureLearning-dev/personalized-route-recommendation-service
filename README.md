@@ -7,10 +7,12 @@
 
 - 设计与使用说明：[src/profile/README.md](src/profile/README.md)
 - 交互式体验：[examples/interactive_profile_demo.py](examples/interactive_profile_demo.py)
+- 预设画像演示：[examples/preset_profile_demo.py](examples/preset_profile_demo.py)
 
 运行验证：
 
 ```bash
 python3 -m unittest discover -s tests -v
 python3 examples/interactive_profile_demo.py
+python3 examples/preset_profile_demo.py
 ```

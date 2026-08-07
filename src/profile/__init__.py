@@ -7,13 +7,20 @@ from .inference import (
     FavourPosteriorPredictor,
     MassPreferencePriorEstimator,
 )
-from .learner import PairwisePreferenceWeightLearner, standard_mass_preference_prior
+from .learner import (
+    PairwisePreferenceWeightLearner,
+    preference_prior_from_weights,
+    preset_preference_prior,
+    preset_preference_weights,
+    standard_mass_preference_prior,
+)
 from .models import (
     GaussianPreferenceModel,
     PREFERENCE_DIMENSIONS,
     PairwisePreference,
     PreferenceDimension,
     PreferenceLearningResult,
+    PreferencePreset,
     RouteAttributes,
 )
 from .normalization import NormalizedCostFeatureExtractor
@@ -30,8 +37,12 @@ __all__ = [
     "PairwisePreferenceWeightLearner",
     "PreferenceDimension",
     "PreferenceLearningResult",
+    "PreferencePreset",
     "ProfileNumericalError",
     "ProfileValidationError",
     "RouteAttributes",
+    "preference_prior_from_weights",
+    "preset_preference_prior",
+    "preset_preference_weights",
     "standard_mass_preference_prior",
 ]
