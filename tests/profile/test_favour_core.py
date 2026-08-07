@@ -16,7 +16,11 @@ from src.profile import (
     PairwisePreference,
     PairwisePreferenceWeightLearner,
     PreferenceDimension,
+    PreferencePreset,
+    ProfileValidationError,
     RouteAttributes,
+    preference_prior_from_weights,
+    preset_preference_weights,
     standard_mass_preference_prior,
 )
 from src.profile.optimization import (
@@ -218,6 +222,82 @@ class FavourWorkflowTests(unittest.TestCase):
             PreferenceDimension.COST,
         )
         self.assertGreater(sum(result.choice_probabilities) / len(comparisons), 0.5)
+
+    def test_named_presets_replace_the_equal_weight_fallback(self) -> None:
+        expected_dominants = {
+            PreferencePreset.TIME_PRIORITY: PreferenceDimension.TIME,
+            PreferencePreset.COST_PRIORITY: PreferenceDimension.COST,
+            PreferencePreset.LOW_WALKING: PreferenceDimension.WALKING_DISTANCE,
+            PreferencePreset.LOW_TRANSFERS: PreferenceDimension.TRANSFERS,
+        }
+
+        for preset, dominant in expected_dominants.items():
+            result = PairwisePreferenceWeightLearner().fit(
+                (),
+                preference_preset=preset,
+            )
+
+            with self.subTest(preset=preset):
+                self.assertAlmostEqual(result.weights[dominant], 0.70)
+                self.assertEqual(
+                    max(PREFERENCE_DIMENSIONS, key=result.weights.__getitem__),
+                    dominant,
+                )
+
+    def test_custom_percentage_weights_are_normalized_into_a_prior(self) -> None:
+        weights = {
+            PreferenceDimension.TIME: 55.0,
+            PreferenceDimension.COST: 25.0,
+            PreferenceDimension.WALKING_DISTANCE: 15.0,
+            PreferenceDimension.TRANSFERS: 5.0,
+        }
+        prior = preference_prior_from_weights(weights)
+        result = PairwisePreferenceWeightLearner().fit(
+            (),
+            mass_preference_prior=prior,
+        )
+
+        for dimension in PREFERENCE_DIMENSIONS:
+            self.assertAlmostEqual(result.weights[dimension], weights[dimension] / 100)
+
+    def test_preset_profile_can_be_updated_by_route_choices(self) -> None:
+        initial = PairwisePreferenceWeightLearner().fit(
+            (),
+            preference_preset=PreferencePreset.TIME_PRIORITY,
+        )
+        comparisons = tuple(
+            _cost_sensitive_comparison(f"preset-update-{index}")
+            for index in range(24)
+        )
+        updated = PairwisePreferenceWeightLearner().fit(
+            comparisons,
+            preference_preset=PreferencePreset.TIME_PRIORITY,
+        )
+
+        self.assertEqual(updated.evidence_count, len(comparisons))
+        self.assertGreater(
+            updated.weights[PreferenceDimension.COST],
+            initial.weights[PreferenceDimension.COST],
+        )
+        self.assertEqual(
+            max(PREFERENCE_DIMENSIONS, key=updated.weights.__getitem__),
+            PreferenceDimension.COST,
+        )
+
+    def test_prior_and_named_preset_cannot_be_supplied_together(self) -> None:
+        with self.assertRaises(ProfileValidationError):
+            PairwisePreferenceWeightLearner().fit(
+                (),
+                mass_preference_prior=standard_mass_preference_prior(),
+                preference_preset=PreferencePreset.TIME_PRIORITY,
+            )
+
+    def test_preset_weight_copy_does_not_mutate_global_configuration(self) -> None:
+        weights = preset_preference_weights(PreferencePreset.COST_PRIORITY)
+        weights[PreferenceDimension.COST] = 0.0
+
+        reloaded = preset_preference_weights(PreferencePreset.COST_PRIORITY)
+        self.assertAlmostEqual(reloaded[PreferenceDimension.COST], 0.70)
 
     def test_each_of_the_four_dimensions_can_be_recovered(self) -> None:
         chosen_values = {

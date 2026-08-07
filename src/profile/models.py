@@ -17,6 +17,16 @@ class PreferenceDimension(StrEnum):
     TRANSFERS = "transfers"
 
 
+class PreferencePreset(StrEnum):
+    """可在缺少个人选择时使用的业务预设画像。"""
+
+    BALANCED = "balanced"
+    TIME_PRIORITY = "time_priority"
+    COST_PRIORITY = "cost_priority"
+    LOW_WALKING = "low_walking"
+    LOW_TRANSFERS = "low_transfers"
+
+
 PREFERENCE_DIMENSIONS: tuple[PreferenceDimension, ...] = tuple(PreferenceDimension)
 Vector = tuple[float, ...]
 Matrix = tuple[tuple[float, ...], ...]
