@@ -7,11 +7,8 @@ from dataclasses import dataclass
 from math import exp, isfinite, log1p, sqrt
 from random import Random
 
-from .exceptions import ProfileNumericalError
-from .models import Matrix
-
-
-Vector = tuple[float, ...]
+from .exceptions import ProfileNumericalError, ProfileValidationError
+from .models import Matrix, Vector
 
 
 def sigmoid(value: float) -> float:
@@ -64,6 +61,8 @@ def symmetrize(matrix: Matrix) -> Matrix:
 
 def solve_linear_system(matrix: Matrix, values: Sequence[float]) -> Vector:
     size = len(matrix)
+    if size == 0 or any(len(row) != size for row in matrix) or len(values) != size:
+        raise ProfileValidationError("线性方程的矩阵和向量维度必须一致")
     augmented = [
         [float(value) for value in row] + [float(values[index])]
         for index, row in enumerate(matrix)
@@ -108,6 +107,8 @@ def inverse_matrix(matrix: Matrix) -> Matrix:
 
 
 def determinant(matrix: Matrix) -> float:
+    if not matrix or any(len(row) != len(matrix) for row in matrix):
+        raise ProfileValidationError("行列式计算需要非空方阵")
     values = [list(row) for row in matrix]
     result = 1.0
     for column in range(len(values)):
@@ -145,6 +146,9 @@ class BoxBoundedTrustRegionOptimizer:
 
     _RUNS = 5
     _SEED = 1
+    _MAX_ITERATIONS = 200
+    # 四维纯 Python 求解器使用该绝对容差，避免在浮点噪声附近空转。
+    _GRADIENT_TOLERANCE = 1e-7
 
     @staticmethod
     def _project(point: Sequence[float], lower: Vector, upper: Vector) -> Vector:
@@ -154,12 +158,26 @@ class BoxBoundedTrustRegionOptimizer:
         )
 
     @staticmethod
-    def _projected_gradient_norm(
+    def _is_blocked(
+        value: float,
+        gradient: float,
+        lower: float,
+        upper: float,
+    ) -> bool:
+        """判断负梯度方向是否会把当前分量推出箱约束。"""
+
+        return (value <= lower + 1e-8 and gradient > 0.0) or (
+            value >= upper - 1e-8 and gradient < 0.0
+        )
+
+    @classmethod
+    def _projected_gradient(
+        cls,
         point: Vector,
         gradient: Vector,
         lower: Vector,
         upper: Vector,
-    ) -> float:
+    ) -> Vector:
         projected = []
         for value, component, low, high in zip(
             point,
@@ -168,11 +186,54 @@ class BoxBoundedTrustRegionOptimizer:
             upper,
             strict=True,
         ):
-            blocked = (value <= low + 1e-8 and component > 0) or (
-                value >= high - 1e-8 and component < 0
-            )
+            blocked = cls._is_blocked(value, component, low, high)
             projected.append(0.0 if blocked else component)
+        return tuple(projected)
+
+    @classmethod
+    def _projected_gradient_norm(
+        cls,
+        point: Vector,
+        gradient: Vector,
+        lower: Vector,
+        upper: Vector,
+    ) -> float:
+        projected = cls._projected_gradient(point, gradient, lower, upper)
         return max(abs(component) for component in projected)
+
+    @classmethod
+    def _gradient_candidate(
+        cls,
+        point: Vector,
+        gradient: Vector,
+        lower: Vector,
+        upper: Vector,
+        radius: float,
+    ) -> Vector:
+        """沿箱约束下的可行负梯度方向生成备用候选点。"""
+
+        direction = tuple(
+            -component
+            for component in cls._projected_gradient(
+                point,
+                gradient,
+                lower,
+                upper,
+            )
+        )
+        direction_norm = norm(direction)
+        if direction_norm > radius:
+            direction = tuple(
+                radius * value / direction_norm for value in direction
+            )
+        return cls._project(
+            tuple(
+                value + change
+                for value, change in zip(point, direction, strict=True)
+            ),
+            lower,
+            upper,
+        )
 
     def _run(
         self,
@@ -186,19 +247,40 @@ class BoxBoundedTrustRegionOptimizer:
         radius = 1.0
         maximum_radius = max(1.0, norm(tuple(high - low for low, high in zip(lower, upper))))
 
-        for _ in range(200):
+        for _ in range(self._MAX_ITERATIONS):
             if self._projected_gradient_norm(
                 current,
                 evaluation.gradient,
                 lower,
                 upper,
-            ) <= 1e-8:
+            ) <= self._GRADIENT_TOLERANCE:
                 return OptimizationResult(current, evaluation, True)
 
-            step = solve_linear_system(
-                add_diagonal(evaluation.hessian, 1e-10),
-                tuple(-value for value in evaluation.gradient),
+            free_indices = tuple(
+                index
+                for index, (value, gradient, low, high) in enumerate(
+                    zip(
+                        current,
+                        evaluation.gradient,
+                        lower,
+                        upper,
+                        strict=True,
+                    )
+                )
+                if not self._is_blocked(value, gradient, low, high)
             )
+            # 只在自由变量子空间求 Newton 步。若把已抵住边界的变量继续放入
+            # 线性方程，其耦合项会扭曲其他维度的方向并造成边界附近来回振荡。
+            reduced_hessian = tuple(
+                tuple(evaluation.hessian[row][column] for column in free_indices)
+                for row in free_indices
+            )
+            reduced_step = solve_linear_system(
+                add_diagonal(reduced_hessian, 1e-10),
+                tuple(-evaluation.gradient[index] for index in free_indices),
+            )
+            free_step = dict(zip(free_indices, reduced_step, strict=True))
+            step = tuple(free_step.get(index, 0.0) for index in range(len(current)))
             step_norm = norm(step)
             if step_norm > radius:
                 step = tuple(radius * value / step_norm for value in step)
@@ -212,15 +294,46 @@ class BoxBoundedTrustRegionOptimizer:
                 new - old for new, old in zip(candidate, current, strict=True)
             )
             if norm(actual_step) <= 1e-10:
-                return OptimizationResult(current, evaluation, True)
+                # Newton 方向可能被箱边界完全截断；此时改用可行的负梯度方向，
+                # 避免把仍可下降的边界点误报为收敛或失败。
+                candidate = self._gradient_candidate(
+                    current,
+                    evaluation.gradient,
+                    lower,
+                    upper,
+                    radius,
+                )
+                actual_step = tuple(
+                    new - old
+                    for new, old in zip(candidate, current, strict=True)
+                )
+                if norm(actual_step) <= 1e-10:
+                    return OptimizationResult(current, evaluation, False)
 
             predicted_reduction = -(
                 dot(evaluation.gradient, actual_step)
                 + 0.5 * quadratic_form(actual_step, evaluation.hessian)
             )
             if predicted_reduction <= 0:
-                radius *= 0.25
-                continue
+                # Newton 模型在活动边界上可能给出非下降步，使用投影梯度重新尝试。
+                candidate = self._gradient_candidate(
+                    current,
+                    evaluation.gradient,
+                    lower,
+                    upper,
+                    radius,
+                )
+                actual_step = tuple(
+                    new - old
+                    for new, old in zip(candidate, current, strict=True)
+                )
+                predicted_reduction = -(
+                    dot(evaluation.gradient, actual_step)
+                    + 0.5 * quadratic_form(actual_step, evaluation.hessian)
+                )
+                if predicted_reduction <= 0 or norm(actual_step) <= 1e-10:
+                    radius *= 0.25
+                    continue
 
             candidate_evaluation = objective(candidate)
             actual_reduction = evaluation.value - candidate_evaluation.value
@@ -244,13 +357,29 @@ class BoxBoundedTrustRegionOptimizer:
     ) -> OptimizationResult:
         lower = tuple(float(value) for value in lower_bounds)
         upper = tuple(float(value) for value in upper_bounds)
+        if not lower or len(lower) != len(upper):
+            raise ProfileValidationError("优化器上下界必须是同长度的非空向量")
+        if any(
+            not isfinite(low) or not isfinite(high) or low > high
+            for low, high in zip(lower, upper, strict=True)
+        ):
+            raise ProfileValidationError("优化器上下界必须是有限数且下界不大于上界")
+
         random = Random(self._SEED)
         starts = tuple(
             tuple(random.uniform(low, high) for low, high in zip(lower, upper, strict=True))
             for _ in range(self._RUNS)
         )
-        results = tuple(
-            self._run(objective, start, lower, upper)
-            for start in starts
-        )
-        return min(results, key=lambda result: result.evaluation.value)
+        results: list[OptimizationResult] = []
+        last_error: ProfileNumericalError | None = None
+        for start in starts:
+            try:
+                results.append(self._run(objective, start, lower, upper))
+            except ProfileNumericalError as error:
+                # 单个随机起点失败时仍允许其他起点完成论文规定的多起点搜索。
+                last_error = error
+
+        converged = [result for result in results if result.converged]
+        if not converged:
+            raise ProfileNumericalError("所有随机起点均未得到收敛结果") from last_error
+        return min(converged, key=lambda result: result.evaluation.value)

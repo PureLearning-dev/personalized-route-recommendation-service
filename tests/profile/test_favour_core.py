@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from math import isclose, log, pi, sqrt
 import unittest
+from unittest.mock import patch
 
 from src.profile import (
     BradleyTerryLogitLikelihood,
@@ -17,6 +18,7 @@ from src.profile import (
     PairwisePreferenceWeightLearner,
     PreferenceDimension,
     PreferencePreset,
+    ProfileNumericalError,
     ProfileValidationError,
     RouteAttributes,
     preference_prior_from_weights,
@@ -27,6 +29,7 @@ from src.profile.optimization import (
     BoxBoundedTrustRegionOptimizer,
     ObjectiveEvaluation,
 )
+from src.profile.inference import FavourLaplaceInference
 
 
 def _cost_sensitive_comparison(suffix: str = "1") -> PairwisePreference:
@@ -199,6 +202,147 @@ class TrustRegionTests(unittest.TestCase):
         for actual, expected in zip(result.point, target, strict=True):
             self.assertAlmostEqual(actual, expected, places=6)
 
+    def test_box_bounded_trust_region_handles_coupled_active_bound(self) -> None:
+        """边界变量不能通过 Hessian 耦合项干扰其余自由变量。"""
+
+        hessian = ((2.0, 1.0), (1.0, 2.0))
+        unconstrained_target = (1.0, -2.0)
+
+        def objective(point: tuple[float, ...]) -> ObjectiveEvaluation:
+            difference = tuple(
+                value - target
+                for value, target in zip(point, unconstrained_target, strict=True)
+            )
+            gradient = tuple(
+                sum(row[column] * difference[column] for column in range(2))
+                for row in hessian
+            )
+            return ObjectiveEvaluation(
+                value=0.5
+                * sum(
+                    difference[row] * gradient[row]
+                    for row in range(2)
+                ),
+                gradient=gradient,
+                hessian=hessian,
+            )
+
+        result = BoxBoundedTrustRegionOptimizer().optimize(
+            objective,
+            (-5.0, -5.0),
+            (0.0, 0.0),
+        )
+
+        self.assertTrue(result.converged)
+        self.assertAlmostEqual(result.point[0], 0.0, places=7)
+        self.assertAlmostEqual(result.point[1], -1.5, places=7)
+
+    def test_optimizer_rejects_result_when_no_start_converges(self) -> None:
+        """达到迭代上限的随机起点不能被当作可用最优解返回。"""
+
+        identity = tuple(
+            tuple(1.0 if row == column else 0.0 for column in range(4))
+            for row in range(4)
+        )
+
+        def objective(point: tuple[float, ...]) -> ObjectiveEvaluation:
+            return ObjectiveEvaluation(
+                value=0.5 * sum(value * value for value in point),
+                gradient=point,
+                hessian=identity,
+            )
+
+        with patch.object(BoxBoundedTrustRegionOptimizer, "_MAX_ITERATIONS", 1):
+            with self.assertRaises(ProfileNumericalError):
+                BoxBoundedTrustRegionOptimizer().optimize(
+                    objective,
+                    (-20.0,) * 4,
+                    (0.0,) * 4,
+                )
+
+    def test_optimizer_rejects_invalid_bounds(self) -> None:
+        """无效边界应在进入随机起点计算前给出领域错误。"""
+
+        with self.assertRaises(ProfileValidationError):
+            BoxBoundedTrustRegionOptimizer().optimize(
+                lambda point: ObjectiveEvaluation(0.0, point, ((1.0,),)),
+                (1.0,),
+                (0.0,),
+            )
+
+
+class EngineeringGuardTests(unittest.TestCase):
+    def test_gaussian_covariance_must_be_positive_definite(self) -> None:
+        """正对角线和对称性不足以证明矩阵是合法协方差。"""
+
+        indefinite = (
+            (1.0, 2.0, 0.0, 0.0),
+            (2.0, 1.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0, 1.0),
+        )
+        with self.assertRaises(ProfileValidationError):
+            GaussianPreferenceModel(
+                mean={dimension: 0.0 for dimension in PREFERENCE_DIMENSIONS},
+                covariance=indefinite,
+                lower_bounds={
+                    dimension: -20.0 for dimension in PREFERENCE_DIMENSIONS
+                },
+                upper_bounds={dimension: 0.0 for dimension in PREFERENCE_DIMENSIONS},
+            )
+
+    def test_normalization_preserves_values_above_reference_scale(self) -> None:
+        """超出参考尺度的路线仍应保留差异，避免真实路线排序失真。"""
+
+        comparison = PairwisePreference(
+            chosen=RouteAttributes("long", 360, 10, 100, 0),
+            rejected=RouteAttributes("very-long", 720, 10, 100, 0),
+        )
+        observation = NormalizedCostFeatureExtractor().extract_comparison(comparison)
+
+        self.assertEqual(observation.chosen[0], 2.0)
+        self.assertEqual(observation.rejected[0], 4.0)
+        self.assertNotEqual(observation.chosen[0], observation.rejected[0])
+
+    def test_mpp_rejects_empty_history_for_any_user(self) -> None:
+        """空历史不能作为一个有效用户参与群体先验估计。"""
+
+        estimator = MassPreferencePriorEstimator(FavourLaplaceInference())
+        with self.assertRaises(ProfileValidationError):
+            estimator.refine(((),), standard_mass_preference_prior())
+
+    def test_mpp_refinement_has_a_hard_iteration_limit(self) -> None:
+        """持续漂移的MPP必须终止并报告错误，不能永久占用服务线程。"""
+
+        class DriftingInference:
+            def infer(
+                self,
+                observations: tuple[object, ...],
+                prior: GaussianPreferenceModel,
+            ) -> tuple[GaussianPreferenceModel, bool]:
+                del observations
+                shifted = {
+                    dimension: prior.mean[dimension] - 0.25
+                    for dimension in PREFERENCE_DIMENSIONS
+                }
+                return (
+                    GaussianPreferenceModel(
+                        mean=shifted,
+                        covariance=prior.covariance,
+                        lower_bounds=prior.lower_bounds,
+                        upper_bounds=prior.upper_bounds,
+                    ),
+                    True,
+                )
+
+        estimator = MassPreferencePriorEstimator(DriftingInference())  # type: ignore[arg-type]
+        with patch.object(MassPreferencePriorEstimator, "_MAX_ITERATIONS", 2):
+            with self.assertRaises(ProfileNumericalError):
+                estimator.refine(
+                    ((object(),),),
+                    standard_mass_preference_prior(),
+                )
+
 
 class FavourWorkflowTests(unittest.TestCase):
     def test_no_evidence_returns_paper_mpp_initialization(self) -> None:
@@ -244,7 +388,7 @@ class FavourWorkflowTests(unittest.TestCase):
                     dominant,
                 )
 
-    def test_custom_percentage_weights_are_normalized_into_a_prior(self) -> None:
+    def test_custom_percentage_weights_are_normalized_into_a_gaussian_prior(self) -> None:
         weights = {
             PreferenceDimension.TIME: 55.0,
             PreferenceDimension.COST: 25.0,
@@ -252,13 +396,17 @@ class FavourWorkflowTests(unittest.TestCase):
             PreferenceDimension.TRANSFERS: 5.0,
         }
         prior = preference_prior_from_weights(weights)
-        result = PairwisePreferenceWeightLearner().fit(
-            (),
-            mass_preference_prior=prior,
-        )
+        sensitivities = {
+            dimension: -prior.mean[dimension]
+            for dimension in PREFERENCE_DIMENSIONS
+        }
+        total = sum(sensitivities.values())
 
         for dimension in PREFERENCE_DIMENSIONS:
-            self.assertAlmostEqual(result.weights[dimension], weights[dimension] / 100)
+            self.assertAlmostEqual(
+                sensitivities[dimension] / total,
+                weights[dimension] / 100,
+            )
 
     def test_preset_profile_can_be_updated_by_route_choices(self) -> None:
         initial = PairwisePreferenceWeightLearner().fit(
@@ -283,14 +431,6 @@ class FavourWorkflowTests(unittest.TestCase):
             max(PREFERENCE_DIMENSIONS, key=updated.weights.__getitem__),
             PreferenceDimension.COST,
         )
-
-    def test_prior_and_named_preset_cannot_be_supplied_together(self) -> None:
-        with self.assertRaises(ProfileValidationError):
-            PairwisePreferenceWeightLearner().fit(
-                (),
-                mass_preference_prior=standard_mass_preference_prior(),
-                preference_preset=PreferencePreset.TIME_PRIORITY,
-            )
 
     def test_preset_weight_copy_does_not_mutate_global_configuration(self) -> None:
         weights = preset_preference_weights(PreferencePreset.COST_PRIORITY)

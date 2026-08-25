@@ -195,18 +195,15 @@ class PairwisePreferenceWeightLearner:
         self,
         comparisons: Sequence[PairwisePreference],
         group_histories: Sequence[Sequence[PairwisePreference]] = (),
-        mass_preference_prior: GaussianPreferenceModel | None = None,
         *,
         preference_preset: PreferencePreset | str | None = None,
     ) -> PreferenceLearningResult:
         """先确定预设或群体MPP，再按公式（6）逐题形成个人画像。"""
 
-        if mass_preference_prior is not None and preference_preset is not None:
-            raise ProfileValidationError("群体MPP与预设画像不能同时指定")
         if preference_preset is not None:
             prior = preset_preference_prior(preference_preset)
         else:
-            prior = mass_preference_prior or standard_mass_preference_prior()
+            prior = standard_mass_preference_prior()
         if group_histories:
             prior = self._mpp_estimator.refine(
                 tuple(self._extract(history) for history in group_histories),

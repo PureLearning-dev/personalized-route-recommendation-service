@@ -1,19 +1,21 @@
 # 个性化推荐服务
 
-本项目用于研究多模式出行中的个性化推荐。
+本项目实现“画像构建”和“路线推荐”两个部分的内容。
 
-当前代码已经覆盖第一版长期基础偏好学习和候选路线推荐：用户比较设计好的
-路线后，系统反推出其对时间、费用、步行距离和换乘次数的偏好权重；推荐阶段
-先执行硬约束过滤和加权初排，也可以对前N条路线使用JND进一步精排。
+通过构建用户的画像，再根据用户的画像去候选路径中选择最推荐的路线，这是项目的核心任务。
 
-- 设计与使用说明：[src/profile/README.md](src/profile/README.md)
-- 交互式体验：[examples/interactive_profile_demo.py](examples/interactive_profile_demo.py)
-- 预设画像演示：[examples/preset_profile_demo.py](examples/preset_profile_demo.py)
-- 候选路线个性化排序：[src/recommendation/README.md](src/recommendation/README.md)
-- 路线排序演示：[examples/personalized_route_ranking_demo.py](examples/personalized_route_ranking_demo.py)
-- 加权与JND两阶段排序演示：[examples/jnd_enhanced_route_ranking_demo.py](examples/jnd_enhanced_route_ranking_demo.py)
+## 如何构建用户画像
 
-运行验证：
+用户的画像被构建为 4 维，包括：时间、费用、步行、换乘，最终得到的画像是维度系数和各自的百分比值，含义为用户重视该纬度的程度。
+
+
+## 如何选择最推荐的路线
+
+## 运行验证
+
+创造合适的情况进行验证。
+
+
 
 ```bash
 python3 -m unittest discover -s tests -v
