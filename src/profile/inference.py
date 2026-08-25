@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from math import log, pi, sqrt
+from math import isfinite, log, pi, sqrt
 
-from .exceptions import ProfileValidationError
+from .exceptions import ProfileNumericalError, ProfileValidationError
 from .models import (
     FeatureComparison,
     GaussianPreferenceModel,
@@ -113,6 +113,9 @@ class FavourLaplaceInference:
             prior.lower_bound_vector(),
             prior.upper_bound_vector(),
         )
+        if not optimized.converged:
+            # 优化器当前会在全部起点失败时抛错，此处保留防御性校验。
+            raise ProfileNumericalError("后验众数优化未收敛")
         covariance = inverse_matrix(optimized.evaluation.hessian)
         posterior = GaussianPreferenceModel(
             mean={
@@ -136,6 +139,9 @@ class FavourLaplaceInference:
         converged = True
         for observation in observations:
             posterior, step_converged = self.infer((observation,), posterior)
+            if not step_converged:
+                # 禁止把不可靠后验继续作为下一次更新的先验。
+                raise ProfileNumericalError("增量后验更新未收敛")
             converged = converged and step_converged
         return posterior, converged
 
@@ -144,6 +150,7 @@ class MassPreferencePriorEstimator:
     """按论文图2迭代精炼MPP，并用公式（7）聚合个人后验。"""
 
     _KL_TOLERANCE = 1e-3
+    _MAX_ITERATIONS = 100
 
     def __init__(self, inference: FavourLaplaceInference) -> None:
         self._inference = inference
@@ -155,6 +162,14 @@ class MassPreferencePriorEstimator:
         posteriors = tuple(posteriors)
         if not posteriors:
             raise ProfileValidationError("MPP聚合至少需要一个个人后验")
+
+        first = posteriors[0]
+        if any(
+            posterior.lower_bounds != first.lower_bounds
+            or posterior.upper_bounds != first.upper_bounds
+            for posterior in posteriors[1:]
+        ):
+            raise ProfileValidationError("MPP聚合的个人后验必须使用相同系数边界")
 
         vectors = [posterior.mean_vector() for posterior in posteriors]
         count = len(vectors)
@@ -175,7 +190,6 @@ class MassPreferencePriorEstimator:
             )
             for row in range(size)
         )
-        first = posteriors[0]
         return GaussianPreferenceModel(
             mean={
                 dimension: mean[index]
@@ -205,15 +219,21 @@ class MassPreferencePriorEstimator:
             for row in range(len(PREFERENCE_DIMENSIONS))
             for column in range(len(PREFERENCE_DIMENSIONS))
         )
-        determinant_ratio = determinant(current.covariance) / determinant(
-            previous.covariance
-        )
-        return 0.5 * (
+        current_determinant = determinant(current.covariance)
+        previous_determinant = determinant(previous.covariance)
+        if current_determinant <= 0.0 or previous_determinant <= 0.0:
+            raise ProfileNumericalError("Gaussian协方差行列式必须为正数")
+
+        divergence = 0.5 * (
             trace_term
             + quadratic_form(mean_difference, inverse_current)
             - len(PREFERENCE_DIMENSIONS)
-            + log(determinant_ratio)
+            + log(current_determinant / previous_determinant)
         )
+        if not isfinite(divergence) or divergence < -1e-10:
+            raise ProfileNumericalError("MPP的KL散度计算结果无效")
+        # 浮点舍入可能产生极小负数，数学上 KL 散度的下界仍为零。
+        return max(0.0, divergence)
 
     def refine(
         self,
@@ -223,17 +243,22 @@ class MassPreferencePriorEstimator:
         training_sets = tuple(tuple(items) for items in user_training_sets)
         if not training_sets:
             raise ProfileValidationError("MPP精炼至少需要一个历史用户")
+        if any(not training_set for training_set in training_sets):
+            raise ProfileValidationError("MPP精炼的每个历史用户都必须包含选择记录")
 
         current = initial_mpp
-        while True:
-            posteriors = tuple(
-                self._inference.infer(training_set, current)[0]
-                for training_set in training_sets
-            )
+        for _ in range(self._MAX_ITERATIONS):
+            posteriors = []
+            for training_set in training_sets:
+                posterior, converged = self._inference.infer(training_set, current)
+                if not converged:
+                    raise ProfileNumericalError("MPP精炼中的个人后验未收敛")
+                posteriors.append(posterior)
             refined = self.aggregate(posteriors)
             if self._kl_divergence(current, refined) < self._KL_TOLERANCE:
                 return refined
             current = refined
+        raise ProfileNumericalError("MPP精炼超过最大迭代次数仍未收敛")
 
 
 class FavourPosteriorPredictor:

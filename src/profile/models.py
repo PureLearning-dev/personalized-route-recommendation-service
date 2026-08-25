@@ -31,6 +31,9 @@ PREFERENCE_DIMENSIONS: tuple[PreferenceDimension, ...] = tuple(PreferenceDimensi
 Vector = tuple[float, ...]
 Matrix = tuple[tuple[float, ...], ...]
 
+# Cholesky 分解时拒绝接近奇异的协方差，避免后续求逆放大浮点误差。
+_POSITIVE_DEFINITE_TOLERANCE = 1e-12
+
 
 def _dimension_values(
     values: Mapping[PreferenceDimension, float],
@@ -57,6 +60,21 @@ def _matrix(matrix: Matrix, field_name: str) -> Matrix:
         for column in range(size):
             if not isclose(copied[row][column], copied[column][row], abs_tol=1e-10):
                 raise ProfileValidationError(f"{field_name}必须是对称矩阵")
+
+    # Gaussian 协方差必须严格正定；仅检查正对角线无法排除负特征值。
+    cholesky = [[0.0] * size for _ in range(size)]
+    for row in range(size):
+        for column in range(row + 1):
+            residual = copied[row][column] - sum(
+                cholesky[row][index] * cholesky[column][index]
+                for index in range(column)
+            )
+            if row == column:
+                if residual <= _POSITIVE_DEFINITE_TOLERANCE:
+                    raise ProfileValidationError(f"{field_name}必须是严格正定矩阵")
+                cholesky[row][column] = sqrt(residual)
+            else:
+                cholesky[row][column] = residual / cholesky[column][column]
     return copied
 
 
@@ -108,6 +126,13 @@ class PairwisePreference:
     def __post_init__(self) -> None:
         if self.chosen.route_id == self.rejected.route_id:
             raise ProfileValidationError("成对比较中的两条路线必须不同")
+        if all(
+            self.chosen.value_for(dimension)
+            == self.rejected.value_for(dimension)
+            for dimension in PREFERENCE_DIMENSIONS
+        ):
+            # 当前四维模型无法从属性完全相同的路线中获得任何偏好证据。
+            raise ProfileValidationError("成对比较中的路线属性不能完全相同")
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +141,13 @@ class FeatureComparison:
 
     chosen: Vector
     rejected: Vector
+
+    def __post_init__(self) -> None:
+        expected_size = len(PREFERENCE_DIMENSIONS)
+        if len(self.chosen) != expected_size or len(self.rejected) != expected_size:
+            raise ProfileValidationError("路线特征必须包含完整的四个画像维度")
+        if any(not isfinite(value) for value in (*self.chosen, *self.rejected)):
+            raise ProfileValidationError("路线特征必须只包含有限数")
 
     def utility_difference(self) -> Vector:
         """返回论文公式中的 u(r_t) - u(q_t)。"""
@@ -139,6 +171,8 @@ class GaussianPreferenceModel:
         mean = _dimension_values(self.mean, "Gaussian均值")
         lower = _dimension_values(self.lower_bounds, "系数下界")
         upper = _dimension_values(self.upper_bounds, "系数上界")
+        if any(lower[d] > upper[d] for d in PREFERENCE_DIMENSIONS):
+            raise ProfileValidationError("Gaussian系数下界不能大于上界")
         if any(not lower[d] <= mean[d] <= upper[d] for d in PREFERENCE_DIMENSIONS):
             raise ProfileValidationError("Gaussian均值必须位于系数边界内")
         object.__setattr__(self, "mean", mean)

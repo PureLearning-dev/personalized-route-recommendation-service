@@ -110,8 +110,8 @@ TARGET_PROFILES = (
 def build_route_pair_list(count: int = ROUTE_PAIR_COUNT) -> list[RoutePair]:
     """生成确定且可复现的候选路线对列表。
 
-    所有数值都位于当前归一化尺度内，避免截断让不同路线失去差异。固定随机
-    种子使每次运行得到完全相同的路线列表和验证结果。
+    所有数值都位于当前归一化尺度的常见范围内。固定随机种子使每次运行得到
+    完全相同的路线列表和验证结果。
     """
 
     random = Random(ROUTE_RANDOM_SEED)
@@ -139,10 +139,7 @@ def _target_route_score(
 
     return sum(
         profile.sensitivities[dimension]
-        * min(
-            route.value_for(dimension) / NORMALIZATION_SCALES[dimension],
-            1.0,
-        )
+        * (route.value_for(dimension) / NORMALIZATION_SCALES[dimension])
         for dimension in PREFERENCE_DIMENSIONS
     )
 
