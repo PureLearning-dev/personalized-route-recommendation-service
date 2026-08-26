@@ -1,0 +1,1 @@
+该目录保存 PostgreSQL 数据库结构迁移。使用 uv run alembic upgrade head 升级。

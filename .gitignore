@@ -1,6 +1,9 @@
 # Project-specific
 .idea/
 tmp/
+.firecrawl/
+.hallmark/
+.DS_Store
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

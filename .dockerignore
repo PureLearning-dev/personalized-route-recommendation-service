@@ -1,0 +1,14 @@
+.git
+.venv
+.idea
+.hallmark
+.codegraph
+.firecrawl
+__pycache__
+*.pyc
+.pytest_cache
+.coverage
+htmlcov
+paper
+artifacts
+tmp
