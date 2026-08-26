@@ -191,6 +191,39 @@ class PairwisePreferenceWeightLearner:
             for comparison in comparisons
         )
 
+    def _result(
+        self,
+        posterior: GaussianPreferenceModel,
+        observations: Sequence[FeatureComparison],
+        *,
+        evidence_count: int,
+        converged: bool,
+    ) -> PreferenceLearningResult:
+        probabilities = tuple(
+            self._predictor.probability(posterior, observation)
+            for observation in observations
+        )
+        sensitivities = {
+            dimension: max(0.0, -posterior.mean[dimension])
+            for dimension in PREFERENCE_DIMENSIONS
+        }
+        total = sum(sensitivities.values())
+        if total <= 1e-12:
+            equal = 1.0 / len(PREFERENCE_DIMENSIONS)
+            weights = {dimension: equal for dimension in PREFERENCE_DIMENSIONS}
+        else:
+            weights = {
+                dimension: sensitivities[dimension] / total
+                for dimension in PREFERENCE_DIMENSIONS
+            }
+        return PreferenceLearningResult(
+            posterior=posterior,
+            weights=weights,
+            evidence_count=evidence_count,
+            converged=converged,
+            choice_probabilities=probabilities,
+        )
+
     def fit(
         self,
         comparisons: Sequence[PairwisePreference],
@@ -215,27 +248,30 @@ class PairwisePreferenceWeightLearner:
             observations,
             prior,
         )
-        probabilities = tuple(
-            self._predictor.probability(posterior, observation)
-            for observation in observations
-        )
-        sensitivities = {
-            dimension: max(0.0, -posterior.mean[dimension])
-            for dimension in PREFERENCE_DIMENSIONS
-        }
-        total = sum(sensitivities.values())
-        if total <= 1e-12:
-            equal = 1.0 / len(PREFERENCE_DIMENSIONS)
-            weights = {dimension: equal for dimension in PREFERENCE_DIMENSIONS}
-        else:
-            weights = {
-                dimension: sensitivities[dimension] / total
-                for dimension in PREFERENCE_DIMENSIONS
-            }
-        return PreferenceLearningResult(
-            posterior=posterior,
-            weights=weights,
+        return self._result(
+            posterior,
+            observations,
             evidence_count=len(observations),
             converged=converged,
-            choice_probabilities=probabilities,
+        )
+
+    def update(
+        self,
+        current: PreferenceLearningResult,
+        comparisons: Sequence[PairwisePreference],
+    ) -> PreferenceLearningResult:
+        """以当前画像后验为先验继续学习，不依赖历史选择记录。"""
+
+        observations = self._extract(comparisons)
+        if not observations:
+            return current
+        posterior, converged = self._inference.update_incrementally(
+            observations,
+            current.posterior,
+        )
+        return self._result(
+            posterior,
+            observations,
+            evidence_count=current.evidence_count + len(observations),
+            converged=converged,
         )
