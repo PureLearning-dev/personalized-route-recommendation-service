@@ -7,7 +7,7 @@ from uuid import UUID
 from pydantic import Field, model_validator
 
 from .common import ApiModel
-from .profiles import ProfileResponse
+from .profiles import ProfileData, ProfileResponse
 
 
 class InitialProfileInput(ApiModel):
@@ -44,3 +44,14 @@ class UserResponse(ApiModel):
     preset_name: str | None
     created_at: datetime
     profile: ProfileResponse
+
+
+class UserListItemResponse(ApiModel):
+    """用户列表项直接携带画像数据，避免重复 user_id 和 profile.profile。"""
+
+    id: UUID
+    external_user_id: str
+    initialization_mode: str
+    preset_name: str | None
+    created_at: datetime
+    profile: ProfileData
