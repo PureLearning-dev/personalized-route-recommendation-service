@@ -44,6 +44,8 @@ docker compose exec postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" 
 
 ## API
 
+完整的请求参数、返回字段、调用示例和联调顺序见根目录的 [API接口使用说明.md](API接口使用说明.md)。
+
 - `POST /v1/users`：创建用户和初始画像。
 - `GET /v1/users`：查询全部用户及其当前画像。
 - `GET /v1/users/{user_id}/profile`：查看当前画像。

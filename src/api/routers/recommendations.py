@@ -1,20 +1,16 @@
 from __future__ import annotations
 
-from uuid import UUID
-
 from fastapi import APIRouter
 
 from ...application.commands import (
-    ChoiceCommand,
     ConstraintsInput,
     JndInput,
     RecommendationCommand,
     RouteInput,
 )
-from ...application.services import FeedbackService, RecommendationService
+from ...application.services import RecommendationService
 from ..dependencies import Repository, SettingsDependency
 from ..presenters import present_profile
-from ..schemas.feedback import ChoiceCreate, ChoiceLearningResponse
 from ..schemas.recommendations import (
     RecommendationCreate,
     RecommendationResponse,
@@ -70,28 +66,3 @@ def recommend(
         rejected_routes=list(result.rejected_routes),
         explanation=result.explanation,
     )
-
-
-@router.post("/users/{user_id}/choices", response_model=ChoiceLearningResponse)
-def learn_choice(
-    user_id: UUID,
-    payload: ChoiceCreate,
-    repository: Repository,
-    settings: SettingsDependency,
-) -> ChoiceLearningResponse:
-    result = FeedbackService(
-        repository,
-        model_cost_unit=settings.model_cost_unit,
-    ).learn_choice(
-        command=ChoiceCommand(
-            user_id=user_id,
-            chosen_route=_route_input(payload.chosen_route),
-            rejected_route=_route_input(payload.rejected_route),
-        )
-    )
-    response = ChoiceLearningResponse(
-        learning_applied=result.learning_applied,
-        profile=present_profile(result.profile),
-    )
-    repository.commit()
-    return response

@@ -80,6 +80,12 @@ def test_database_has_only_two_business_tables(api: ApiHarness) -> None:
     assert tables == {"alembic_version", "users", "user_profiles"}
 
 
+def test_choice_api_is_grouped_under_users(api: ApiHarness) -> None:
+    schema = api.client.get("/openapi.json").json()
+    operation = schema["paths"]["/v1/users/{user_id}/choices"]["post"]
+    assert operation["tags"] == ["users"]
+
+
 def test_list_all_users_with_current_profiles(api: ApiHarness) -> None:
     assert api.client.get("/v1/users").json() == []
     first = create_user(api, external_id="list-user-001").json()
@@ -93,7 +99,10 @@ def test_list_all_users_with_current_profiles(api: ApiHarness) -> None:
     response = api.client.get("/v1/users")
 
     assert response.status_code == 200
-    assert response.json() == [first, second]
+    assert response.json() == [
+        {**first, "profile": first["profile"]["profile"]},
+        {**second, "profile": second["profile"]["profile"]},
+    ]
 
 
 def test_health_and_current_profile_crud(api: ApiHarness) -> None:
